@@ -1,0 +1,144 @@
+kind: Namespace
+apiVersion: v1
+metadata:
+  name: withinboredom
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: delay-tls
+  namespace: withinboredom
+spec:
+  dnsNames:
+    - delay.withinboredom.info
+    - nodelay.withinboredom.info
+  issuerRef:
+    group: cert-manager.io
+    kind: ClusterIssuer
+    name: letsencrypt
+  secretName: delay-tls
+  usages:
+    - digital signature
+    - key encipherment
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: testing-delay
+  namespace: withinboredom
+  labels:
+    app: testing-delay
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: testing-delay
+  template:
+    metadata:
+      labels:
+        app: testing-delay
+    spec:
+      volumes:
+        - name: ssl
+          secret:
+            secretName: delay-tls
+            defaultMode: 420
+      containers:
+        - name: testing-nodelay
+          image: registry.bottled.codes/withinboredom/nginx:delay
+          volumeMounts:
+            - name: ssl
+              readOnly: true
+              mountPath: /keys
+          imagePullPolicy: Always
+        - name: php
+          image: registry.bottled.codes/withinboredom/random-delay:latest
+          imagePullPolicy: Always
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: testing-nodelay
+  namespace: withinboredom
+  labels:
+    app: testing-nodelay
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: testing-nodelay
+  template:
+    metadata:
+      labels:
+        app: testing-nodelay
+    spec:
+      volumes:
+        - name: ssl
+          secret:
+            secretName: delay-tls
+            defaultMode: 420
+      containers:
+        - name: testing-nodelay
+          image: registry.bottled.codes/withinboredom/nginx:latest
+          volumeMounts:
+            - name: ssl
+              readOnly: true
+              mountPath: /keys
+          imagePullPolicy: Always
+        - name: php
+          image: registry.bottled.codes/withinboredom/random-delay:latest
+          imagePullPolicy: Always
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: testing-delay
+  namespace: withinboredom
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: delay.withinboredom.info
+spec:
+  ports:
+    - name: http
+      protocol: TCP
+      port: 3000
+      targetPort: 80
+    - name: https
+      protocol: TCP
+      port: 3443
+      targetPort: 443
+  selector:
+    app: testing-delay
+  type: LoadBalancer
+  externalTrafficPolicy: Cluster
+  ipFamilyPolicy: PreferDualStack
+  allocateLoadBalancerNodePorts: true
+  internalTrafficPolicy: Cluster
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: testing-nodelay
+  namespace: withinboredom
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: nodelay.withinboredom.info
+spec:
+  ports:
+    - name: http
+      protocol: TCP
+      port: 4002
+      targetPort: 80
+      nodePort: 30515
+    - name: https
+      protocol: TCP
+      port: 4443
+      targetPort: 443
+      nodePort: 30842
+  selector:
+    app: testing-nodelay
+  type: LoadBalancer
+  sessionAffinity: None
+  externalTrafficPolicy: Cluster
+  ipFamilyPolicy: PreferDualStack
+  allocateLoadBalancerNodePorts: true
+  internalTrafficPolicy: Cluster

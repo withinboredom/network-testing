@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Testing Nagles vs. TCP_NODELAY</title>
+</head>
+<body>
+<h1>Testing Nagle's Algorithm vs. TCP_NODELAY</h1>
+<p>This is a simple test script to see how Nagles performs vs. TCP_NODELAY</p>
+<p>Note: this uses quite a bit of bandwidth between us. If you want to deploy this, please checkout the Github repo: <a>TBD</a>
+</p>
+<br>
+<label>
+    Response size:
+    <select id="size">
+        <option value="empty.json">Empty JSON object</option>
+        <option value="10">10 bytes</option>
+        <option selected value="204800">200 kilobytes</option>
+        <option value="524288">512 kilobytes</option>
+        <option value="1048576">1 Megabyte</option>
+    </select>
+</label>
+<br>
+<label>
+    Use sporadic data:
+    <input type="checkbox" id="sporadic">
+</label>
+<br>
+<label>
+    Number of requests:
+    <select id="requests">
+        <option value="1">1</option>
+        <option selected value="3">3</option>
+        <option value="5">5</option>
+        <option value="10">10</option>
+    </select>
+</label>
+<br>
+<br>
+<button type="button" onclick="go()">See which is faster</button>
+<br>
+<p id="status"></p>
+<table>
+    <thead>
+    <tr>
+        <th>Algorithm</th>
+        <th>Connection (ms)</th>
+        <th>Latency (ms)</th>
+        <th>Bandwidth (ms)</th>
+        <th>Total (ms)</th>
+    </tr>
+    </thead>
+    <tbody id="tbl">
+    <!--
+    <tr>
+        <td>Nagles</td>
+        <td id="dc"></td>
+        <td id="dl"></td>
+        <td id="db"></td>
+        <td id="dt"></td>
+    </tr>
+    <tr>
+        <td>TCP_NODELAY</td>
+        <td id="tc"></td>
+        <td id="nl"></td>
+        <td id="nb"></td>
+        <td id="nt"></td>
+    </tr>
+    -->
+    </tbody>
+</table>
+<sup>* = affected by Chromium bug #1030255</sup>
+
+<script>
+    const responses = {
+        nodelay: [],
+        delay: [],
+    };
+
+    const reqs = () => parseInt(document.getElementById('requests').value);
+
+    function maybeUpdateLink(last) {
+        const sum = (a, key) => a.map(x => x[key]).reduce((a, b) => a + b, 0);
+
+        // (5 - 5) + (15 - 10) + (10 - 25) === (5 + 15 + 10) - (5 + 10 + 25)
+        const calculateLatencyTiming = (responseTime) => sum(responseTime, 'responseStart') - sum(responseTime, 'connectStart');
+        const calculateDownloadTiming = (responseTime) => sum(responseTime, 'responseEnd') - sum(responseTime, 'responseStart');
+
+        const calculateConnectionTiming = (responseTime) => sum(responseTime, 'connectEnd') - sum(responseTime, 'connectStart');
+
+        const row = last.name.startsWith('https://delay') ? 'Nagle' : (last.name.startsWith('https://nodelay') ? 'TCP_NODELAY' : null)
+
+        document.getElementById('tbl').innerHTML += `
+            <tr>
+                <td>${row} [${Math.max(responses.nodelay.length, responses.delay.length)}]${last.connectEnd - last.connectStart === 0 ? ' *' : ''}</td>
+                <td>${(last.connectEnd - last.connectStart).toFixed(2)}</td>
+                <td>${(last.responseStart - last.connectStart).toFixed(2)}</td>
+                <td>${(last.responseEnd - last.responseStart).toFixed(2)}</td>
+                <td>${(last.responseEnd - last.connectStart).toFixed(2)}</td>
+            </tr>
+        `;
+
+        if (responses.nodelay.length >= reqs() && responses.delay.length >= reqs()) {
+            const latency = calculateLatencyTiming(responses.nodelay) - calculateLatencyTiming(responses.delay);
+            const download = calculateDownloadTiming(responses.nodelay) - calculateDownloadTiming(responses.delay);
+            const connection = calculateConnectionTiming(responses.nodelay) - calculateConnectionTiming(responses.delay);
+
+            if (latency === 0 && responses.delay.duration !== responses.nodelay.duration) {
+                document.getElementById('status').innerHTML = `Your browser doesn't implement the performance timing API correctly. Please use a modern browser.`;
+                return;
+            }
+
+            if (Math.abs(latency) < 0.5) {
+                console.log("There is literally no congestion on the route.");
+            } else if (latency > 0) {
+                console.log("There is congestion on the route.");
+            } else {
+                console.log("There is literally no congestion on the route, but it is a long route.");
+            }
+
+            document.getElementById('status').innerHTML =
+                `Latency: ${latency / reqs() > 0 ? 'Nagles' : 'TCP_NODELAY'} is ${Math.abs(latency / reqs()).toFixed(2)}ms faster (avg)<br>` +
+                `Throughput: ${download / reqs() > 0 ? 'Nagles' : 'TCP_NODELAY'} is ${Math.abs(download / reqs()).toFixed(2)}ms faster (avg)<br><hr>` +
+                `Conclusion:<br>Using ${(latency + download + connection) / reqs() > 0 ? 'Nagles' : 'TCP_NODELAY'} would return a response ${Math.abs((download + latency + connection) / reqs()).toFixed(2)}ms sooner on average.<br>` +
+                `Using ${(latency + download) / reqs() > 0 ? 'Nagles' : 'TCP_NODELAY'} would return a response ${Math.abs((download + latency) / reqs()).toFixed(2)}ms sooner on average, with keepalives.`;
+        }
+    }
+
+    const obs = new PerformanceObserver((list) => {
+        list.getEntries()
+            //.filter(({name}) => name.endsWith('512k'))
+            .forEach(value => {
+                key = value.name.startsWith('https://delay') ? 'delay' : (value.name.startsWith('https://nodelay') ? 'nodelay' : null);
+                if (key) {
+                    responses[key].push(value);
+                    maybeUpdateLink(value);
+                }
+            })
+    })
+
+    function sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    async function request(url, wait) {
+        const req = fetch(url, {
+            cache: 'no-store'
+        });
+
+        if (wait) {
+            const reader = (await req).body.getReader();
+            while (true) {
+                const {done} = await reader.read();
+                if (done) {
+                    break;
+                }
+            }
+        }
+
+        // deal with Chrome bug id: #1030255
+        await sleep(500);
+    }
+
+    async function go() {
+        responses.nodelay = [];
+        responses.delay = [];
+        document.getElementById('tbl').innerHTML = '';
+        document.getElementById('status').innerHTML = `Loading... 0 of ${reqs() * 2} requests completed.`;
+        obs.observe({entryTypes: ['resource']})
+        const size = document.getElementById('size').value;
+        const sporadic = document.getElementById('sporadic').checked;
+
+        function getUrl(delay, size, sporadic, seed) {
+            return `https://${delay ? 'delay' : 'nodelay'}.withinboredom.info:${delay ? 3443 : 4443}/${sporadic ? `sporadic.php?seed=${seed}&size=` : ''}${size}`;
+        }
+
+        for (let i = 0; i < reqs(); i++) {
+            const seed = Math.random() * 1000000;
+            try {
+                await request(getUrl(true, size, sporadic, seed), true);
+                document.getElementById('status').innerHTML = `Loading... ${i * 2} of ${reqs() * 2} requests completed.`;
+                await request(getUrl(false, size, sporadic, seed), true);
+            } catch (er) {
+                console.log('error', er);
+                document.getElementById('status').innerHTML = `There was an error downloading a file. This might be a chrome bug: https://bugs.chromium.org/p/chromium/issues/detail?id=1404380`;
+            }
+        }
+    }
+</script>
+</body>
+</html>
